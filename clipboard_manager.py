@@ -9,15 +9,13 @@ import ctypes
 
 clipboard_history = []
 MAX_HISTORY = 10 # The number of clipboard entries to remember
-press_count = 0 # The number of times the paste hotkey has been pressed, used for cycling
+press_count = 0
 paste_timer = None
-DELAY = 0.20 # The delay before pasting the clipboard content, lower = faster paste feel
-FILE_ENTRY = "__FILE_COPY__"  # Sentinel value stored in history when files/folders are copied
-_ignore_next_change = False # Mutes the listener during our own paste operations
-
+DELAY = 0.20
+FILE_ENTRY = "__FILE_COPY__"
+_ignore_next_change = False
 WM_CLIPBOARDUPDATE = 0x031D
 
-# Function to check if the clipboard contains a file/folder
 def is_file_on_clipboard():
     try:
         win32clipboard.OpenClipboard()
@@ -31,7 +29,6 @@ def is_file_on_clipboard():
         except Exception:
             pass
 
-# Shared function that saves a new entry to history
 def save_to_history(entry):
     if len(clipboard_history) == 0 or clipboard_history[0] != entry:
         clipboard_history.insert(0, entry)
@@ -42,7 +39,6 @@ def save_to_history(entry):
         else:
             print(f"Saved: {entry[:40]}")
 
-# Called whenever the clipboard changes (from any source)
 def on_clipboard_change():
     global _ignore_next_change
     if _ignore_next_change:
@@ -58,20 +54,17 @@ def on_clipboard_change():
     except Exception:
         pass
 
-# Creates a hidden window that listens for WM_CLIPBOARDUPDATE
 def clipboard_listener():
     wc = win32gui.WNDCLASS()
     wc.lpfnWndProc = wnd_proc
     wc.lpszClassName = "ClipboardListenerWindow"
     wc.hInstance = win32api.GetModuleHandle(None)
     win32gui.RegisterClass(wc)
-
     hwnd = win32gui.CreateWindow(
         wc.lpszClassName, "", 0,
         0, 0, 0, 0,
         0, 0, wc.hInstance, None
     )
-
     ctypes.windll.user32.AddClipboardFormatListener(hwnd)
     win32gui.PumpMessages()
 
@@ -80,29 +73,38 @@ def wnd_proc(hwnd, msg, wparam, lparam):
         on_clipboard_change()
     return win32gui.DefWindowProc(hwnd, msg, wparam, lparam)
 
-# Actually executes the paste operation
+def resolve_entry(count_snapshot):
+    if not clipboard_history:
+        return None, None
+    if count_snapshot == 1:
+        return 0, clipboard_history[0]
+    text_entries = [(i, e) for i, e in enumerate(clipboard_history) if e != FILE_ENTRY]
+    if not text_entries:
+        return None, None
+    text_index = min(count_snapshot - 2, len(text_entries) - 1)
+    i, entry = text_entries[text_index]
+    return i, entry
+
 def do_paste(count_snapshot):
     global press_count, _ignore_next_change
-    if not clipboard_history:
-        press_count = 0
+    press_count = 0
+
+    raw_index, entry = resolve_entry(count_snapshot)
+    if entry is None:
         return
 
-    index = min(count_snapshot - 1, len(clipboard_history) - 1)
-    entry = clipboard_history[index]
     if entry == FILE_ENTRY:
-        # File paste doesn't touch the clipboard so no need to mute
-        keyboard.send("ctrl+v")
-        print(f"Pasted [file/folder] [{index+1}/{len(clipboard_history)}]")
+        if is_file_on_clipboard():
+            keyboard.send("ctrl+v")
+            print(f"Pasted [file/folder] [1/{len(clipboard_history)}]")
+        else:
+            print(f"Pasted [file/folder - suppressed, file no longer on clipboard] [1/{len(clipboard_history)}]")
     else:
-        # Mute the listener so pyperclip.copy() doesn't corrupt the history
         _ignore_next_change = True
         pyperclip.copy(entry)
         keyboard.send("ctrl+v")
-        print(f"Pasted [{index+1}/{len(clipboard_history)}]")
+        print(f"Pasted [{raw_index+1}/{len(clipboard_history)}]")
 
-    press_count = 0
-
-# Function to handle the timing/cycling
 def handle_paste():
     global press_count, paste_timer
     if not clipboard_history:
@@ -116,11 +118,9 @@ def handle_paste():
     paste_timer = threading.Timer(DELAY, do_paste, args=[snapshot])
     paste_timer.start()
 
-# Function to register global hotkeys, used in macros.py
 def register_clipboard_hotkeys():
     listener_thread = threading.Thread(target=clipboard_listener, daemon=True)
     listener_thread.start()
-
     keyboard.add_hotkey("ctrl+v", handle_paste, suppress=True)
     print("Clipboard cycling active.")
     print("Ctrl+C = copy (auto-detected) | Ctrl+V = smart cycle paste.")
