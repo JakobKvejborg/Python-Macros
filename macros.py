@@ -1,7 +1,7 @@
 import ctypes
 import subprocess
 import keyboard
-import time
+from clipboard_manager import register_clipboard_hotkeys
 
 # macros.py
 # Requirements: pip install keyboard
@@ -53,7 +53,12 @@ def kill_foreground_process():
 
 if __name__ == "__main__":
     print("Hotkeys active: F8 = Sleep, F9 = Kill process. Press ESC to quit.")
+
+    # Register clipboard hotkeys
+    register_clipboard_hotkeys()
+
+    # Other hotkeys
+    keyboard.add_hotkey("f7", lambda: (print("F7 pressed -> locking..."), lock_workstation()))
     keyboard.add_hotkey("f8", lambda: (print("F8 pressed -> sleeping..."), sleep_pc()))
     keyboard.add_hotkey("f9", lambda: (print("F9 pressed -> killing foreground process..."), kill_foreground_process()))
-    # keyboard.add_hotkey("f7", lambda: (print("F7 pressed -> locking..."), lock_workstation()))
-    keyboard.wait("esc")
+    keyboard.wait("shift+esc")
