@@ -9,9 +9,6 @@ import ctypes
 clipboard_history = []
 MAX_HISTORY = 10
 press_count = 0
-paste_timer = None
-DELAY = 0.17
-FILE_ENTRY = "__FILE_COPY__"
 _ignore_next_change = False
 WM_CLIPBOARDUPDATE = 0x031D
 
@@ -49,10 +46,7 @@ def save_to_history(entry):
         clipboard_history.insert(0, entry)
         if len(clipboard_history) > MAX_HISTORY:
             clipboard_history.pop()
-        if entry == FILE_ENTRY:
-            print("Saved: [file/folder copy]")
-        else:
-            print(f"Saved: {entry[:40]}")
+        print(f"Saved: {entry[:40]}")
 
 def on_clipboard_change():
     global _ignore_next_change
@@ -64,7 +58,7 @@ def on_clipboard_change():
         return
     try:
         if is_file_on_clipboard():
-            return  # just ignore, don't save to history
+            return
         else:
             text = pyperclip.paste()
             if text:
@@ -91,36 +85,40 @@ def wnd_proc(hwnd, msg, wparam, lparam):
         on_clipboard_change()
     return win32gui.DefWindowProc(hwnd, msg, wparam, lparam)
 
-def do_paste(count_snapshot):
+def do_paste():
     global press_count, _ignore_next_change
     if not clipboard_history:
         press_count = 0
         return
-    index = min(count_snapshot - 1, len(clipboard_history) - 1)
+    index = min(press_count - 1, len(clipboard_history) - 1)
     entry = clipboard_history[index]
-    if entry == FILE_ENTRY:
-        keyboard.send("ctrl+v")
-        print(f"Pasted [file/folder] [{index+1}/{len(clipboard_history)}]")
-    else:
-        _ignore_next_change = True
-        pyperclip.copy(entry)
-        keyboard.send("ctrl+v")
-        print(f"Pasted [{index+1}/{len(clipboard_history)}]")
+    _ignore_next_change = True
+    pyperclip.copy(entry)
+    keyboard.send("ctrl+v")
+    print(f"Pasted [{index+1}/{len(clipboard_history)}]")
     press_count = 0
 
+def wait_for_ctrl_release():
+    done = threading.Event()
+    def on_ctrl_up(e):
+        if e.name == "ctrl" and e.event_type == keyboard.KEY_UP:
+            done.set()
+            return False  # unhook
+    keyboard.hook(on_ctrl_up)
+    done.wait()
+    do_paste()
+
 def handle_paste():
-    global press_count, paste_timer
+    global press_count
     if is_image_on_clipboard() or is_file_on_clipboard():
         keyboard.send("ctrl+v")
         return
     if not clipboard_history:
         return
     press_count += 1
-    if paste_timer and paste_timer.is_alive():
-        paste_timer.cancel()
-    snapshot = press_count
-    paste_timer = threading.Timer(DELAY, do_paste, args=[snapshot])
-    paste_timer.start()
+    # Only spawn the release-waiter on the first V press
+    if press_count == 1:
+        threading.Thread(target=wait_for_ctrl_release, daemon=True).start()
 
 def register_clipboard_hotkeys():
     listener_thread = threading.Thread(target=clipboard_listener, daemon=True)
