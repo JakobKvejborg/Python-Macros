@@ -5,11 +5,8 @@ import win32clipboard
 import win32api
 import win32gui
 import ctypes
-import struct
 
 clipboard_history = []
-MAX_HISTORY = 10
-press_count = 0
 MAX_HISTORY = 10
 press_count = 0
 paste_timer = None
@@ -52,8 +49,8 @@ def save_to_history(entry):
         clipboard_history.insert(0, entry)
         if len(clipboard_history) > MAX_HISTORY:
             clipboard_history.pop()
-        if isinstance(entry, tuple) and entry[0] == FILE_ENTRY:
-            print(f"Saved: [file/folder copy] {entry[1]}")
+        if entry == FILE_ENTRY:
+            print("Saved: [file/folder copy]")
         else:
             print(f"Saved: {entry[:40]}")
 
@@ -67,10 +64,7 @@ def on_clipboard_change():
         return
     try:
         if is_file_on_clipboard():
-            file_paths = get_file_paths_from_clipboard()
-            if file_paths:
-                entry = (FILE_ENTRY, file_paths)
-                save_to_history(entry)
+            save_to_history(FILE_ENTRY)
         else:
             text = pyperclip.paste()
             if text:
@@ -99,16 +93,14 @@ def wnd_proc(hwnd, msg, wparam, lparam):
 
 def do_paste(count_snapshot):
     global press_count, _ignore_next_change
-    press_count = 0
-
-    raw_index, entry = resolve_entry(count_snapshot)
-    if entry is None:
+    if not clipboard_history:
+        press_count = 0
         return
     index = min(count_snapshot - 1, len(clipboard_history) - 1)
     entry = clipboard_history[index]
     if entry == FILE_ENTRY:
         keyboard.send("ctrl+v")
-        print(f"Pasted [file/folder] {file_paths} [1/{len(clipboard_history)}]")
+        print(f"Pasted [file/folder] [{index+1}/{len(clipboard_history)}]")
     else:
         _ignore_next_change = True
         pyperclip.copy(entry)
