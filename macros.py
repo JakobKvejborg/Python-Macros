@@ -1,7 +1,9 @@
 import ctypes
 import subprocess
+import threading
 import keyboard
 from clipboard_manager import register_clipboard_hotkeys
+import tkinter as tk
 
 # macros.py
 # Requirements: pip install keyboard
@@ -12,6 +14,63 @@ from clipboard_manager import register_clipboard_hotkeys
 # To make it run on windows startup:
 # 1. Press Win + R, type "shell:startup", and hit Enter.
 # 2. Place the .exe into that folder.
+
+def show_startup_popup():
+    root = tk.Tk()
+    root.overrideredirect(True)  # Remove window borders
+    root.attributes("-topmost", True)
+
+    width, height = 260, 80
+
+    # Center the window
+    screen_width = root.winfo_screenwidth()
+    screen_height = root.winfo_screenheight()
+    x = int((screen_width / 2) - (width / 2))
+    y = int((screen_height / 2) - (height / 2))
+
+    root.geometry(f"{width}x{height}+{x}+{y}")
+
+    label = tk.Label(
+        root,
+        text="Macros program active",
+        font=("Segoe UI", 11),
+        bg="#222",
+        fg="white"
+    )
+    label.pack(expand=True, fill="both")
+
+    # Auto close after 2 seconds
+    root.after(2000, root.destroy)
+
+    root.mainloop()
+
+threading.Thread(target=show_startup_popup, daemon=True).start()
+
+def show_close_popup():
+    root = tk.Tk()
+    root.overrideredirect(True)
+    root.attributes("-topmost", True)
+
+    width, height = 260, 80
+
+    screen_width = root.winfo_screenwidth()
+    screen_height = root.winfo_screenheight()
+    x = int((screen_width / 2) - (width / 2))
+    y = int((screen_height / 2) - (height / 2))
+
+    root.geometry(f"{width}x{height}+{x}+{y}")
+
+    label = tk.Label(
+        root,
+        text="Closing macros program",
+        font=("Segoe UI", 11),
+        bg="#222",
+        fg="white"
+    )
+    label.pack(expand=True, fill="both")
+
+    root.after(1000, root.destroy)
+    root.mainloop()
 
 # Sleep the PC function (mapped to F8)
 def sleep_pc():
@@ -54,6 +113,8 @@ def kill_foreground_process():
 if __name__ == "__main__":
     print("Hotkeys active: F8 = Sleep, F9 = Kill process. Press ESC to quit.")
 
+    show_startup_popup()
+
     # Register clipboard hotkeys
     register_clipboard_hotkeys()
 
@@ -62,3 +123,4 @@ if __name__ == "__main__":
     keyboard.add_hotkey("f8", lambda: (print("F8 pressed -> sleeping..."), sleep_pc()))
     keyboard.add_hotkey("f9", lambda: (print("F9 pressed -> killing foreground process..."), kill_foreground_process()))
     keyboard.wait("shift+esc")
+    show_close_popup()
