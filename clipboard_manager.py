@@ -11,7 +11,7 @@ clipboard_history = []
 MAX_HISTORY = 10 # The number of clipboard entries to remember
 press_count = 0 # The number of times the paste hotkey has been pressed, used for cycling
 paste_timer = None
-DELAY = 0.15 # The delay before pasting the clipboard content, lower = faster paste feel
+DELAY = 0.17 # The delay before pasting the clipboard content, lower = faster paste feel
 FILE_ENTRY = "__FILE_COPY__"  # Sentinel value stored in history when files/folders are copied
 _ignore_next_change = False # Mutes the listener during our own paste operations
 WM_CLIPBOARDUPDATE = 0x031D
