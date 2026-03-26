@@ -15,6 +15,7 @@ DELAY = 0.17 # The delay before pasting the clipboard content, lower = faster pa
 FILE_ENTRY = "__FILE_COPY__"  # Sentinel value stored in history when files/folders are copied
 _ignore_next_change = False # Mutes the listener during our own paste operations
 WM_CLIPBOARDUPDATE = 0x031D
+# Is git not working
 
 # Function to check if the clipboard contains a file/folder
 def is_file_on_clipboard():
