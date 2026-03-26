@@ -64,7 +64,7 @@ def on_clipboard_change():
         return
     try:
         if is_file_on_clipboard():
-            save_to_history(FILE_ENTRY)
+            return  # just ignore, don't save to history
         else:
             text = pyperclip.paste()
             if text:
@@ -110,7 +110,7 @@ def do_paste(count_snapshot):
 
 def handle_paste():
     global press_count, paste_timer
-    if is_image_on_clipboard():
+    if is_image_on_clipboard() or is_file_on_clipboard():
         keyboard.send("ctrl+v")
         return
     if not clipboard_history:
