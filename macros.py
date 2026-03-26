@@ -5,6 +5,8 @@ import keyboard
 from clipboard_manager import register_clipboard_hotkeys
 import tkinter as tk
 
+from window_watcher import start_window_watcher
+
 # macros.py
 # Requirements: pip install keyboard
 # On Windows you may need to run this script as Administrator for global hotkeys or to invoke sleep/hibernate.
@@ -86,6 +88,7 @@ if __name__ == "__main__":
 
     # Register clipboard hotkeys
     register_clipboard_hotkeys()
+    # start_window_watcher()
 
     # Other hotkeys
     keyboard.add_hotkey("f7", lambda: (print("F7 pressed -> locking..."), lock_workstation()))
