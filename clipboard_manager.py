@@ -6,6 +6,8 @@ import win32api
 import win32gui
 import ctypes
 
+# clipboard_manager.py
+
 clipboard_history = []
 MAX_HISTORY = 10
 press_count = 0

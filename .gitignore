@@ -8,3 +8,7 @@ build/macros/PYZ-00.pyz
 build/macros/PYZ-00.toc
 build/macros/warn-macros.txt
 build/macros/xref-macros.html
+build/
+dist/
+*.spec
+__pycache__/
