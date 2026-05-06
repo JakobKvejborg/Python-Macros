@@ -1,3 +1,5 @@
+import json
+import os
 import time
 import threading
 import ctypes
@@ -10,12 +12,27 @@ import psutil
 
 # window_watcher.py
 
-SAVE_INTERVAL = 30        # seconds between auto-saves
-RESTORE_DELAY = 6         # seconds after wake before restoring (let Windows settle)
-GUID_MONITOR_POWER_ON = "{02731015-4510-4526-99E6-E5A17EBD1AEA}"
-HPOWERNOTIFY = ctypes.wintypes.HANDLE()
-PBT_POWERSETTINGCHANGE = 0x8013
+# Tracks window positions for specified apps and restores them after sleep/wake
+# or monitor power cycles. Positions are persisted to disk so they survive
+# crashes and reboots.
 
+
+SAVE_INTERVAL   = 30   # seconds between auto-saves
+RESTORE_DELAY   = 5    # seconds after wake before restoring (let Windows settle)
+
+# These are the power broadcast messages used for sleep/wake detection
+PBT_APMSUSPEND         = 0x0004
+PBT_APMRESUMEAUTOMATIC = 0x0012
+PBT_APMRESUMESUSPEND   = 0x0007
+PBT_POWERSETTINGCHANGE = 0x8013
+WM_POWERBROADCAST      = 0x0218
+
+
+# Persist positions next to this script so they survive restarts.
+_SCRIPT_DIR     = os.path.dirname(os.path.abspath(__file__))
+POSITIONS_FILE  = os.path.join(_SCRIPT_DIR, "window_positions.json")
+
+GUID_MONITOR_POWER_ON = "{02731015-4510-4526-99E6-E5A17EBD1AEA}"
 
 # Apps to track, by process name (lowercase). Add/remove as needed.
 TRACKED_APPS = {
@@ -30,25 +47,18 @@ TRACKED_APPS = {
     "battle.net.exe",
 }
 
-saved_positions = {}  # { proc|index: { x, y, w, h, maximized } }
-positions_lock = threading.Lock()
+saved_positions: dict = {}
+positions_lock  = threading.Lock()
 
-def debug_windows():
-    def callback(hwnd, _):
-        if not win32gui.IsWindowVisible(hwnd):
-            return
-        title = win32gui.GetWindowText(hwnd)
-        if not title:
-            return
-        try:
-            _, pid = win32process.GetWindowThreadProcessId(hwnd)
-            proc = psutil.Process(pid).name().lower()
-        except:
-            return
-        placement = win32gui.GetWindowPlacement(hwnd)
-        rect = placement[4]
-        print(f"{proc} | '{title[:40]}' | placement rect: {rect} | showCmd: {placement[1]}")
-    win32gui.EnumWindows(callback, None)
+# Guard against duplicate restore calls that can arrive when both
+# PBT_APMRESUMESUSPEND *and* the monitor-on POWERBROADCAST_SETTING fire
+# within a short window of each other.
+_restore_timer: threading.Timer | None = None
+_restore_lock   = threading.Lock()
+
+# ---------------------------------------------------------------------------
+# Win32 structures
+# ---------------------------------------------------------------------------
 
 class POWERBROADCAST_SETTING(ctypes.Structure):
     _fields_ = [
@@ -57,17 +67,19 @@ class POWERBROADCAST_SETTING(ctypes.Structure):
         ("PowerSettingValue", ctypes.wintypes.DWORD),
     ]
 
-# --- Window helpers ---
+# ---------------------------------------------------------------------------
+# Window helpers
+# ---------------------------------------------------------------------------
 
-def get_proc_name(hwnd):
+def get_proc_name(hwnd: int) -> str | None:
     try:
         _, pid = win32process.GetWindowThreadProcessId(hwnd)
-        proc = psutil.Process(pid)
-        return proc.name().lower()
+        return psutil.Process(pid).name().lower()
     except Exception:
         return None
 
-def is_relevant_window(hwnd):
+
+def is_relevant_window(hwnd: int) -> bool:
     if not win32gui.IsWindowVisible(hwnd):
         return False
     if win32gui.GetWindowTextLength(hwnd) == 0:
@@ -75,150 +87,219 @@ def is_relevant_window(hwnd):
     proc = get_proc_name(hwnd)
     return proc in TRACKED_APPS
 
-def get_window_placement(hwnd):
+
+def get_window_placement(hwnd: int) -> dict | None:
     try:
         placement = win32gui.GetWindowPlacement(hwnd)
-        # placement[1] = showCmd, placement[4] = normal position rect
-        maximized = placement[1] == win32con.SW_SHOWMAXIMIZED
-        rect = placement[4]  # (left, top, right, bottom) in normal state
+        # placement[1] = showCmd, placement[4] = normal position rect (left, top, right, bottom)
+        show_cmd = placement[1]
+        rect     = placement[4]
         return {
-            "x": rect[0],
-            "y": rect[1],
-            "w": rect[2] - rect[0],
-            "h": rect[3] - rect[1],
-            "maximized": maximized,
+            "x":        rect[0],
+            "y":        rect[1],
+            "w":        rect[2] - rect[0],
+            "h":        rect[3] - rect[1],
+            "maximized": show_cmd == win32con.SW_SHOWMAXIMIZED,
+            "minimized": show_cmd == win32con.SW_SHOWMINIMIZED,
         }
     except Exception:
         return None
 
-def restore_window_placement(hwnd, pos):
+
+def restore_window_placement(hwnd: int, pos: dict) -> None:
     try:
-        show_cmd = win32con.SW_SHOWMAXIMIZED if pos["maximized"] else win32con.SW_SHOWNORMAL
+        if pos["maximized"]:
+            show_cmd = win32con.SW_SHOWMAXIMIZED
+        elif pos["minimized"]:
+            show_cmd = win32con.SW_SHOWMINIMIZED
+        else:
+            show_cmd = win32con.SW_SHOWNORMAL
+
         placement = (
-            0,                          # flags
-            show_cmd,                   # showCmd
-            (0, 0),                     # ptMinPosition
-            (0, 0),                     # ptMaxPosition
-            (                           # rcNormalPosition
+            0,          # flags
+            show_cmd,   # showCmd
+            (0, 0),     # ptMinPosition
+            (0, 0),     # ptMaxPosition
+            (           # rcNormalPosition
                 pos["x"],
                 pos["y"],
                 pos["x"] + pos["w"],
                 pos["y"] + pos["h"],
-            )
+            ),
         )
         win32gui.SetWindowPlacement(hwnd, placement)
     except Exception as e:
-        print(f"Failed to restore window: {e}")
+        print(f"[window_watcher] Failed to restore window: {e}")
 
-# --- Save / restore logic ---
 
-def snapshot_positions():
-    new_positions = {}
-    proc_counters = {}
+def _enumerate_windows() -> dict:
+    """Return {key: placement} for all currently visible tracked windows."""
+    positions: dict    = {}
+    proc_counters: dict = {}
+
     def callback(hwnd, _):
-        if is_relevant_window(hwnd):
-            proc = get_proc_name(hwnd)
-            count = proc_counters.get(proc, 0)
-            proc_counters[proc] = count + 1
-            key = f"{proc}|{count}"
-            placement = get_window_placement(hwnd)
-            if placement:
-                new_positions[key] = placement
-    win32gui.EnumWindows(callback, None)
-    return new_positions
+        if not is_relevant_window(hwnd):
+            return
+        proc  = get_proc_name(hwnd)
+        count = proc_counters.get(proc, 0)
+        proc_counters[proc] = count + 1
+        key   = f"{proc}|{count}"
+        p     = get_window_placement(hwnd)
+        if p:
+            positions[key] = p
 
-def save_positions():
-    positions = snapshot_positions()
+    win32gui.EnumWindows(callback, None)
+    return positions
+
+
+def save_positions() -> None:
+    positions = _enumerate_windows()
     with positions_lock:
         saved_positions.clear()
         saved_positions.update(positions)
-    print(f"[{time.strftime('%H:%M:%S')}] Saved {len(positions)} window positions (in memory).")
+    # Persist to disk so positions survive a crash or reboot.
+    try:
+        with open(POSITIONS_FILE, "w", encoding="utf-8") as f:
+            json.dump(positions, f, indent=2)
+    except Exception as e:
+        print(f"[window_watcher] Could not write positions file: {e}")
+    print(f"[{time.strftime('%H:%M:%S')}] Saved {len(positions)} window positions.")
 
-def restore_positions():
+
+def load_positions_from_disk() -> None:
+    """Load previously saved positions into memory (called at startup)."""
+    if not os.path.exists(POSITIONS_FILE):
+        return
+    try:
+        with open(POSITIONS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        with positions_lock:
+            saved_positions.clear()
+            saved_positions.update(data)
+        print(f"[window_watcher] Loaded {len(data)} saved positions from disk.")
+    except Exception as e:
+        print(f"[window_watcher] Could not read positions file: {e}")
+
+
+def restore_positions() -> None:
     print(f"[{time.strftime('%H:%M:%S')}] Restoring window positions...")
-    restored = 0
-    proc_counters = {}
+    restored     = 0
+    proc_counters: dict = {}
+
     def callback(hwnd, _):
         nonlocal restored
-        if is_relevant_window(hwnd):
-            proc = get_proc_name(hwnd)
-            count = proc_counters.get(proc, 0)
-            proc_counters[proc] = count + 1
-            key = f"{proc}|{count}"
-            with positions_lock:
-                pos = saved_positions.get(key)
-            if pos:
-                restore_window_placement(hwnd, pos)
-                restored += 1
+        if not is_relevant_window(hwnd):
+            return
+        proc  = get_proc_name(hwnd)
+        count = proc_counters.get(proc, 0)
+        proc_counters[proc] = count + 1
+        key   = f"{proc}|{count}"
+        with positions_lock:
+            pos = saved_positions.get(key)
+        if pos:
+            restore_window_placement(hwnd, pos)
+            restored += 1
+
     win32gui.EnumWindows(callback, None)
-    print(f"Restored {restored} windows.")
+    print(f"[window_watcher] Restored {restored} windows.")
 
-# --- Auto-save thread ---
 
-def auto_save_loop():
+def _auto_save_loop() -> None:
     while True:
         time.sleep(SAVE_INTERVAL)
         save_positions()
 
-# --- Sleep/wake detection via WM_POWERBROADCAST ---
 
-PBT_APMSUSPEND         = 0x0004
-PBT_APMRESUMEAUTOMATIC = 0x0012
-PBT_APMRESUMESUSPEND   = 0x0007
-WM_POWERBROADCAST      = 0x0218
+def _schedule_restore(delay: float = RESTORE_DELAY) -> None:
+    global _restore_timer
+    with _restore_lock:
+        if _restore_timer is not None:
+            _restore_timer.cancel()
+        _restore_timer = threading.Timer(delay, _do_restore)
+        _restore_timer.daemon = True
+        _restore_timer.start()
 
-def on_wake():
-    print(f"[{time.strftime('%H:%M:%S')}] Wake detected, waiting {RESTORE_DELAY}s for displays to settle...")
-    time.sleep(RESTORE_DELAY)
+
+def _do_restore() -> None:
+    global _restore_timer
+    print(f"[{time.strftime('%H:%M:%S')}] Wake/monitor-on detected — restoring after {RESTORE_DELAY}s delay...")
     restore_positions()
+    with _restore_lock:
+        _restore_timer = None
 
-def power_listener():
-    """Hidden window that receives WM_POWERBROADCAST messages."""
-    wc = win32gui.WNDCLASS()
-    wc.lpszClassName = "PowerListenerWindow"
-    wc.hInstance = ctypes.windll.kernel32.GetModuleHandleW(None)
-    wc.lpfnWndProc = wnd_proc
+
+def _wnd_proc(hwnd, msg, wparam, lparam):
+    if msg == WM_POWERBROADCAST:
+        if wparam == PBT_APMSUSPEND:
+            # Save *now*, before Windows has moved anything.
+            print(f"[{time.strftime('%H:%M:%S')}] Sleep detected — saving positions.")
+            save_positions()
+
+        elif wparam in (PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND):
+            _schedule_restore()
+
+        elif wparam == PBT_POWERSETTINGCHANGE:
+            try:
+                setting = ctypes.cast(lparam, ctypes.POINTER(POWERBROADCAST_SETTING)).contents
+                if setting.PowerSettingValue == 0:
+                    print(f"[{time.strftime('%H:%M:%S')}] Monitor turned off.")
+                else:
+                    print(f"[{time.strftime('%H:%M:%S')}] Monitor turned on.")
+                    _schedule_restore()
+            except Exception:
+                pass
+
+    return win32gui.DefWindowProc(hwnd, msg, wparam, lparam)
+
+
+def _power_listener() -> None:
+    wc               = win32gui.WNDCLASS()
+    wc.lpszClassName = "PowerListenerWindow_WW"
+    wc.hInstance     = ctypes.windll.kernel32.GetModuleHandleW(None)
+    wc.lpfnWndProc   = _wnd_proc
     win32gui.RegisterClass(wc)
+
     hwnd = win32gui.CreateWindow(
         wc.lpszClassName, "", 0,
-        0, 0, 0, 0, 0, 0, wc.hInstance, None
+        0, 0, 0, 0, 0, 0, wc.hInstance, None,
     )
+
     guid = comtypes.GUID(GUID_MONITOR_POWER_ON)
     ctypes.windll.user32.RegisterPowerSettingNotification(
-        hwnd, ctypes.byref(guid), 0
+        hwnd, ctypes.byref(guid), 0,
     )
     win32gui.PumpMessages()
 
-def wnd_proc(hwnd, msg, wparam, lparam):
-    if msg == WM_POWERBROADCAST:
-        if wparam == PBT_APMSUSPEND:
-            print(f"[{time.strftime('%H:%M:%S')}] Sleep detected.")
-            # Don't save here - Windows may have already disturbed window positions
-        elif wparam in (PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND):
-            threading.Thread(target=on_wake, daemon=True).start()
-        elif wparam == PBT_POWERSETTINGCHANGE:
-            setting = ctypes.cast(lparam, ctypes.POINTER(POWERBROADCAST_SETTING)).contents
-            if setting.PowerSettingValue == 0:
-                print(f"[{time.strftime('%H:%M:%S')}] Monitor turned off.")
-            else:
-                print(f"[{time.strftime('%H:%M:%S')}] Monitor turned on — restoring positions.")
-                threading.Thread(target=on_wake, daemon=True).start()
-    return win32gui.DefWindowProc(hwnd, msg, wparam, lparam)
 
-# --- Entry point ---
+# Print info about all visible tracked windows — useful for troubleshooting.
+def debug_windows() -> None:
+    def callback(hwnd, _):
+        if not win32gui.IsWindowVisible(hwnd):
+            return
+        title = win32gui.GetWindowText(hwnd)
+        if not title:
+            return
+        try:
+            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+            proc  = psutil.Process(pid).name().lower()
+        except Exception:
+            return
+        placement = win32gui.GetWindowPlacement(hwnd)
+        rect      = placement[4]
+        print(f"  {proc} | '{title[:40]}' | rect={rect} | showCmd={placement[1]}")
+    print("=== Visible windows ===")
+    win32gui.EnumWindows(callback, None)
+    print("=======================")
 
-def start():
-    # Initial snapshot into memory
-    save_positions()
-    # Auto-save thread
-    threading.Thread(target=auto_save_loop, daemon=True).start()
-    # Sleep/wake listener (blocks on PumpMessages)
-    print(f"Watching {len(TRACKED_APPS)} app(s). Auto-saving every {SAVE_INTERVAL}s.")
-    print("Press Ctrl+C to quit.")
-    power_listener()
 
-def start_window_watcher():
-    save_positions()
-    threading.Thread(target=auto_save_loop, daemon=True).start()
-    threading.Thread(target=power_listener, daemon=True).start()
-    print(f"Window watcher active. Watching {len(TRACKED_APPS)} app(s), auto-saving every {SAVE_INTERVAL}s.")
+def start_window_watcher() -> None:
+    load_positions_from_disk()
+    save_positions()                                          # fresh snapshot
+
+    threading.Thread(target=_auto_save_loop,  daemon=True).start()
+    threading.Thread(target=_power_listener,  daemon=True).start()
+
+    print(
+        f"[window_watcher] Active — watching {len(TRACKED_APPS)} app(s), "
+        f"auto-saving every {SAVE_INTERVAL}s."
+    )
